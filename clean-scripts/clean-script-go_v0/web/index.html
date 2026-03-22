@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Codex Auth Cleaner</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script defer src="/app.js"></script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Codex Auth Cleaner</p>
+          <h1>批量检查额度、401 与隔离恢复</h1>
+          <p class="subtitle">单次扫描会递归检查认证文件，识别 401、额度超限与 unlimited 状态，并支持自动清理失效文件。</p>
+        </div>
+        <div class="hero-meta">
+          <span id="run-state" class="pill">待机</span>
+          <span id="last-scan" class="muted">尚未扫描</span>
+        </div>
+      </header>
+
+      <main class="grid">
+        <section class="panel control-panel">
+          <div class="panel-head">
+            <h2>扫描参数</h2>
+            <button id="scan-button" class="button primary">开始扫描</button>
+          </div>
+
+          <div class="form-grid">
+            <label>
+              <span>Auth 目录</span>
+              <input id="auth_dir" type="text" />
+            </label>
+            <label>
+              <span>Exceeded 目录</span>
+              <input id="exceeded_dir" type="text" />
+            </label>
+            <label>
+              <span>Model</span>
+              <input id="model" type="text" />
+            </label>
+            <label>
+              <span>Workers</span>
+              <input id="workers" type="number" min="1" />
+            </label>
+            <label>
+              <span>Timeout (s)</span>
+              <input id="timeout_seconds" type="number" min="1" step="0.5" />
+            </label>
+          </div>
+
+          <div class="toggle-row">
+            <label class="toggle"><input id="refresh_before_check" type="checkbox" /><span>检查前刷新 Token</span></label>
+            <label class="toggle"><input id="no_quarantine" type="checkbox" /><span>禁用超限隔离</span></label>
+            <label class="toggle"><input id="delete_401" type="checkbox" /><span>扫描后自动删除 401</span></label>
+          </div>
+
+          <div class="progress-wrap">
+            <div class="progress-head">
+              <span id="progress-label">等待任务</span>
+              <span id="progress-count">0 / 0</span>
+            </div>
+            <div class="progress-bar">
+              <div id="progress-fill"></div>
+            </div>
+          </div>
+
+          <div id="error-banner" class="error-banner hidden"></div>
+        </section>
+
+        <section class="panel stats-panel">
+          <div class="panel-head">
+            <h2>统计概览</h2>
+            <button id="delete-button" class="button danger ghost" disabled>删除当前 401</button>
+          </div>
+          <div class="stats-grid">
+            <article class="stat-card">
+              <span>总文件</span>
+              <strong id="stat-total">0</strong>
+            </article>
+            <article class="stat-card stat-red">
+              <span>401</span>
+              <strong id="stat-401">0</strong>
+            </article>
+            <article class="stat-card stat-gold">
+              <span>超限</span>
+              <strong id="stat-exceeded">0</strong>
+            </article>
+            <article class="stat-card stat-green">
+              <span>Unlimited</span>
+              <strong id="stat-unlimited">0</strong>
+            </article>
+            <article class="stat-card stat-slate">
+              <span>错误</span>
+              <strong id="stat-errors">0</strong>
+            </article>
+          </div>
+
+          <div class="summary-grid">
+            <div class="summary-box">
+              <h3>隔离摘要</h3>
+              <p id="quarantine-summary" class="muted">尚无数据</p>
+            </div>
+            <div class="summary-box">
+              <h3>删除摘要</h3>
+              <p id="delete-summary" class="muted">尚无数据</p>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <section class="panel results-panel">
+        <div class="panel-head">
+          <h2>扫描结果</h2>
+          <div class="filters">
+            <button data-filter="all" class="chip active">全部</button>
+            <button data-filter="401" class="chip">401</button>
+            <button data-filter="exceeded" class="chip">超限</button>
+            <button data-filter="unlimited" class="chip">Unlimited</button>
+            <button data-filter="errors" class="chip">错误</button>
+          </div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>状态</th>
+                <th>文件</th>
+                <th>Email</th>
+                <th>Account ID</th>
+                <th>重置时间</th>
+                <th>详情</th>
+              </tr>
+            </thead>
+            <tbody id="results-body">
+              <tr>
+                <td colspan="6" class="empty">暂无结果</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </body>
+</html>

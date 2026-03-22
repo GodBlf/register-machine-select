@@ -1,0 +1,559 @@
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import sys
+from dataclasses import asdict
+from typing import Any
+
+import uvicorn
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, StreamingResponse
+from pydantic import BaseModel, Field
+
+from scanner import (
+    CheckResult,
+    DEFAULT_CODEX_BASE_URL,
+    DEFAULT_REFRESH_URL,
+    DEFAULT_RETRY_ATTEMPTS,
+    DEFAULT_RETRY_BACKOFF,
+    DEFAULT_WORKERS,
+    _build_probe_body,
+    _delete_files,
+    scan_auth_files,
+)
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+# ---------------------------------------------------------------------------
+# Pydantic models
+# ---------------------------------------------------------------------------
+
+class ScanRequest(BaseModel):
+    auth_dir: str
+    workers: int = Field(default=DEFAULT_WORKERS, ge=1)
+    timeout: float = Field(default=20, gt=0)
+    model: str = Field(default="gpt-5")
+    refresh_before_check: bool = Field(default=False)
+    no_quarantine: bool = Field(default=False)
+    delete_401: bool = Field(default=False)
+
+
+class Delete401Request(BaseModel):
+    files: list[str]
+
+
+# ---------------------------------------------------------------------------
+# Scan state manager
+# ---------------------------------------------------------------------------
+
+class ScanManager:
+    def __init__(self) -> None:
+        self.running: bool = False
+        self.subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
+        self.last_result: dict[str, Any] | None = None
+        self._lock: asyncio.Lock | None = None
+
+    @property
+    def lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
+
+    def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
+        q: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self.subscribers.add(q)
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue[dict[str, Any]]) -> None:
+        self.subscribers.discard(q)
+
+    def publish(self, event: dict[str, Any]) -> None:
+        for q in list(self.subscribers):
+            try:
+                q.put_nowait(event)
+            except asyncio.QueueFull:
+                pass
+
+    async def start_scan(self, req: ScanRequest) -> None:
+        async with self.lock:
+            if self.running:
+                raise HTTPException(status_code=409, detail="scan already running")
+            self.running = True
+            self.last_result = None
+        try:
+            asyncio.create_task(run_scan(req))
+        except Exception:
+            self.running = False
+            raise
+
+
+def build_args(req: ScanRequest) -> argparse.Namespace:
+    return argparse.Namespace(
+        auth_dir=req.auth_dir,
+        workers=req.workers,
+        timeout=req.timeout,
+        model=req.model,
+        refresh_before_check=req.refresh_before_check,
+        no_quarantine=req.no_quarantine,
+        delete_401=req.delete_401,
+        base_url=DEFAULT_CODEX_BASE_URL,
+        quota_path="/responses",
+        retry_attempts=DEFAULT_RETRY_ATTEMPTS,
+        retry_backoff=DEFAULT_RETRY_BACKOFF,
+        refresh_url=DEFAULT_REFRESH_URL,
+        output_json=False,
+        no_progress=True,
+        no_color=True,
+        yes=True,
+        exceeded_dir=None,
+    )
+
+
+# ---------------------------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------------------------
+
+app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+manager = ScanManager()
+
+
+async def run_scan(req: ScanRequest) -> None:
+    try:
+        args = build_args(req)
+        probe_body = _build_probe_body(args.model)
+
+        def progress_callback(current: int, total: int, path: Any) -> None:
+            manager.publish({
+                "type": "progress",
+                "current": current,
+                "total": total,
+                "filename": getattr(path, "name", str(path)),
+            })
+
+        results: list[CheckResult] = await scan_auth_files(
+            args, probe_body, progress_callback=progress_callback
+        )
+
+        unauthorized_files = [r.file for r in results if r.unauthorized_401]
+        deleted_files: list[str] = []
+        delete_errors: list[dict[str, Any]] = []
+
+        if req.delete_401 and unauthorized_files:
+            raw_deleted, raw_errors = _delete_files(unauthorized_files)
+            deleted_files = raw_deleted
+            delete_errors = [asdict(e) for e in raw_errors]
+
+        final: dict[str, Any] = {
+            "type": "final",
+            "results": [asdict(r) for r in results],
+            "deletion": {
+                "requested": req.delete_401,
+                "target_count": len(unauthorized_files),
+                "deleted_count": len(deleted_files),
+                "deleted_files": deleted_files,
+                "errors": delete_errors,
+            },
+        }
+        manager.last_result = final
+        manager.publish(final)
+    except Exception as exc:  # noqa: BLE001
+        error_event = {"type": "error", "message": str(exc)}
+        manager.last_result = error_event
+        manager.publish(error_event)
+    finally:
+        manager.running = False
+
+
+# ---------------------------------------------------------------------------
+# Inline HTML
+# ---------------------------------------------------------------------------
+
+_HTML = """<!DOCTYPE html>
+<html lang="zh" class="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Codex Auth Scanner</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>tailwind.config = { darkMode: 'class' }</script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<style>
+  [x-cloak]{display:none!important}
+  .badge{display:inline-flex;align-items:center;padding:1px 8px;border-radius:9999px;font-size:.7rem;font-weight:700;white-space:nowrap}
+  .scroll-table{overflow-x:auto}
+  .trunc{max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+</style>
+</head>
+<body class="bg-gray-950 text-gray-200 min-h-screen" x-data="scanner()" x-init="init()">
+
+<!-- Header -->
+<div class="border-b border-gray-800 px-6 py-3 flex items-center justify-between">
+  <div class="flex items-center gap-3">
+    <span class="text-lg font-bold text-white">Codex Auth Scanner</span>
+    <span x-show="scanning" class="badge bg-blue-900 text-blue-300 animate-pulse">扫描中</span>
+  </div>
+  <div class="flex items-center gap-2 text-xs text-gray-500">
+    <span x-show="results.length > 0" x-text="'上次扫描: ' + lastScanTime"></span>
+  </div>
+</div>
+
+<!-- Config + Scan -->
+<div class="px-6 py-4 border-b border-gray-800 bg-gray-900/50">
+  <div class="flex flex-wrap gap-3 items-end">
+    <div class="flex-1 min-w-48">
+      <label class="text-xs text-gray-400 mb-1 block">Auth 目录</label>
+      <input x-model="config.auth_dir" type="text" placeholder="~/.cli-proxy-api"
+        class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+    </div>
+    <div class="w-28">
+      <label class="text-xs text-gray-400 mb-1 block">Model</label>
+      <input x-model="config.model" type="text"
+        class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+    </div>
+    <div class="w-24">
+      <label class="text-xs text-gray-400 mb-1 block">Timeout (s)</label>
+      <input x-model.number="config.timeout" type="number" min="1"
+        class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+    </div>
+    <div class="w-24">
+      <label class="text-xs text-gray-400 mb-1 block">Workers</label>
+      <input x-model.number="config.workers" type="number" min="1"
+        class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm focus:outline-none focus:border-blue-500">
+    </div>
+    <label class="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer select-none pb-1.5">
+      <input type="checkbox" x-model="config.refresh_before_check" class="accent-blue-500"> Refresh Token
+    </label>
+    <label class="flex items-center gap-1.5 text-xs text-gray-300 cursor-pointer select-none pb-1.5">
+      <input type="checkbox" x-model="config.no_quarantine" class="accent-blue-500"> 禁用隔离
+    </label>
+    <button @click="startScan()" :disabled="scanning"
+      class="px-5 py-1.5 rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-sm font-semibold transition-colors">
+      <span x-text="scanning ? '扫描中...' : '开始扫描'"></span>
+    </button>
+  </div>
+
+  <!-- Progress bar -->
+  <div x-show="scanning || progress.total > 0" x-cloak class="mt-3">
+    <div class="flex justify-between text-xs text-gray-400 mb-1">
+      <span x-text="progress.filename || '准备中...'"></span>
+      <span x-text="progress.total > 0 ? progress.current + '/' + progress.total : ''"></span>
+    </div>
+    <div class="w-full bg-gray-800 rounded-full h-1.5">
+      <div class="bg-blue-500 h-1.5 rounded-full transition-all duration-200"
+        :style="'width:' + (progress.total > 0 ? Math.round(progress.current*100/progress.total) : 0) + '%'"></div>
+    </div>
+  </div>
+
+  <!-- Error -->
+  <div x-show="scanError" x-cloak class="mt-2 text-xs text-red-400 bg-red-950/40 rounded px-3 py-2" x-text="scanError"></div>
+</div>
+
+<!-- Stats cards -->
+<div x-show="results.length > 0" x-cloak class="px-6 py-4 grid grid-cols-2 sm:grid-cols-5 gap-3">
+  <div @click="activeTab='all'" class="stat-card bg-gray-800 cursor-pointer rounded-lg p-3 text-center hover:bg-gray-700 transition-colors" :class="activeTab==='all'?'ring-1 ring-gray-500':''">
+    <div class="text-2xl font-bold text-white" x-text="stats.total"></div>
+    <div class="text-xs text-gray-400 mt-0.5">Total</div>
+  </div>
+  <div @click="activeTab='401'" class="stat-card bg-red-950/60 cursor-pointer rounded-lg p-3 text-center hover:bg-red-900/60 transition-colors" :class="activeTab==='401'?'ring-1 ring-red-500':''">
+    <div class="text-2xl font-bold text-red-400" x-text="stats.unauthorized"></div>
+    <div class="text-xs text-red-400/70 mt-0.5">401 未授权</div>
+  </div>
+  <div @click="activeTab='exceeded'" class="stat-card bg-purple-950/60 cursor-pointer rounded-lg p-3 text-center hover:bg-purple-900/60 transition-colors" :class="activeTab==='exceeded'?'ring-1 ring-purple-500':''">
+    <div class="text-2xl font-bold text-purple-400" x-text="stats.exceeded"></div>
+    <div class="text-xs text-purple-400/70 mt-0.5">配额超限</div>
+  </div>
+  <div @click="activeTab='unlimited'" class="stat-card bg-green-950/60 cursor-pointer rounded-lg p-3 text-center hover:bg-green-900/60 transition-colors" :class="activeTab==='unlimited'?'ring-1 ring-green-500':''">
+    <div class="text-2xl font-bold text-green-400" x-text="stats.unlimited"></div>
+    <div class="text-xs text-green-400/70 mt-0.5">无限额</div>
+  </div>
+  <div @click="activeTab='errors'" class="stat-card bg-yellow-950/60 cursor-pointer rounded-lg p-3 text-center hover:bg-yellow-900/60 transition-colors" :class="activeTab==='errors'?'ring-1 ring-yellow-500':''">
+    <div class="text-2xl font-bold text-yellow-400" x-text="stats.errors"></div>
+    <div class="text-xs text-yellow-400/70 mt-0.5">错误</div>
+  </div>
+</div>
+
+<!-- Results -->
+<div x-show="results.length > 0" x-cloak class="px-6 pb-6">
+
+  <!-- Tabs + Delete button -->
+  <div class="flex items-center justify-between mb-3">
+    <div class="flex gap-1 text-xs">
+      <template x-for="tab in [{id:'all',label:'全部'},{id:'401',label:'401'},{id:'exceeded',label:'超限'},{id:'unlimited',label:'无限额'},{id:'errors',label:'错误'}]" :key="tab.id">
+        <button @click="activeTab=tab.id"
+          :class="activeTab===tab.id ? 'bg-gray-700 text-white' : 'text-gray-400 hover:text-white'"
+          class="px-3 py-1 rounded transition-colors" x-text="tab.label"></button>
+      </template>
+    </div>
+    <div x-show="stats.unauthorized > 0">
+      <div x-show="!confirmDelete">
+        <button @click="confirmDelete=true"
+          class="px-3 py-1 text-xs rounded bg-red-900/60 hover:bg-red-800 text-red-300 transition-colors">
+          删除 401 文件 (<span x-text="stats.unauthorized"></span>)
+        </button>
+      </div>
+      <div x-show="confirmDelete" class="flex items-center gap-2">
+        <span class="text-xs text-red-400">确认删除 <span x-text="stats.unauthorized"></span> 个文件？</span>
+        <button @click="deleteFiles()" class="px-3 py-1 text-xs rounded bg-red-600 hover:bg-red-500 text-white">确认</button>
+        <button @click="confirmDelete=false" class="px-3 py-1 text-xs rounded bg-gray-700 hover:bg-gray-600 text-gray-300">取消</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Delete result -->
+  <div x-show="deleteResult" x-cloak class="mb-3 text-xs bg-gray-800 rounded px-3 py-2 text-gray-300" x-text="deleteResult"></div>
+
+  <!-- Table -->
+  <div class="scroll-table rounded-lg border border-gray-800 bg-gray-900/40">
+    <table class="w-full text-xs">
+      <thead>
+        <tr class="border-b border-gray-800 text-gray-500">
+          <th class="px-3 py-2 text-left w-20">状态</th>
+          <th class="px-3 py-2 text-left">文件</th>
+          <th class="px-3 py-2 text-left w-36">Email</th>
+          <th class="px-3 py-2 text-left w-28">Account ID</th>
+          <th class="px-3 py-2 text-left w-32">重置时间</th>
+          <th class="px-3 py-2 text-left w-32">详情</th>
+        </tr>
+      </thead>
+      <tbody>
+        <template x-for="(item, i) in filteredResults()" :key="i">
+          <tr class="border-b border-gray-800/60 hover:bg-gray-800/40 transition-colors">
+            <td class="px-3 py-2">
+              <span :class="badgeClass(item)" class="badge" x-text="statusLabel(item)"></span>
+            </td>
+            <td class="px-3 py-2">
+              <span class="trunc text-gray-300 font-mono" :title="item.file" x-text="item.file"></span>
+            </td>
+            <td class="px-3 py-2 text-gray-400 truncate" x-text="item.email || '—'"></td>
+            <td class="px-3 py-2 text-gray-500 font-mono truncate text-xs" x-text="item.account_id ? item.account_id.slice(0,12)+'…' : '—'"></td>
+            <td class="px-3 py-2 text-purple-400 text-xs" x-text="formatResetTime(item)"></td>
+            <td class="px-3 py-2 text-gray-500 truncate" x-text="item.error || ''"></td>
+          </tr>
+        </template>
+        <tr x-show="filteredResults().length === 0">
+          <td colspan="6" class="px-3 py-6 text-center text-gray-600">无结果</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+function scanner() {
+  return {
+    config: {
+      auth_dir: '~/.cli-proxy-api',
+      model: 'gpt-5',
+      timeout: 20,
+      workers: 100,
+      refresh_before_check: false,
+      no_quarantine: false,
+    },
+    scanning: false,
+    progress: { current: 0, total: 0, filename: '' },
+    results: [],
+    stats: { total: 0, unauthorized: 0, exceeded: 0, unlimited: 0, errors: 0 },
+    activeTab: 'all',
+    confirmDelete: false,
+    deleteResult: '',
+    scanError: '',
+    lastScanTime: '',
+    _es: null,
+
+    init() {},
+
+    startScan() {
+      if (this.scanning) return;
+      this.scanning = true;
+      this.scanError = '';
+      this.results = [];
+      this.stats = { total: 0, unauthorized: 0, exceeded: 0, unlimited: 0, errors: 0 };
+      this.progress = { current: 0, total: 0, filename: '' };
+      this.confirmDelete = false;
+      this.deleteResult = '';
+
+      fetch('/api/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(this.config),
+      })
+        .then(r => {
+          if (!r.ok) return r.json().then(d => { throw new Error(d.detail || r.statusText); });
+          this._listenSSE();
+        })
+        .catch(err => {
+          this.scanError = err.message;
+          this.scanning = false;
+        });
+    },
+
+    _listenSSE() {
+      if (this._es) this._es.close();
+      this._es = new EventSource('/api/scan/stream');
+
+      this._es.onmessage = (e) => {
+        const data = JSON.parse(e.data);
+        if (data.type === 'progress') {
+          this.progress = { current: data.current, total: data.total, filename: data.filename };
+        } else if (data.type === 'final') {
+          this.results = data.results;
+          this._calcStats();
+          this.scanning = false;
+          this.lastScanTime = new Date().toLocaleTimeString();
+          this._es.close();
+        } else if (data.type === 'error') {
+          this.scanError = data.message;
+          this.scanning = false;
+          this._es.close();
+        }
+      };
+
+      this._es.onerror = () => {
+        if (!this.scanning) return;
+        this.scanError = 'SSE 连接断开';
+        this.scanning = false;
+        this._es.close();
+      };
+    },
+
+    _calcStats() {
+      this.stats = {
+        total: this.results.length,
+        unauthorized: this.results.filter(r => r.unauthorized_401).length,
+        exceeded: this.results.filter(r => r.quota_exceeded && !r.unauthorized_401).length,
+        unlimited: this.results.filter(r => r.no_limit_unlimited).length,
+        errors: this.results.filter(r => r.error && !r.unauthorized_401 && !r.quota_exceeded).length,
+      };
+    },
+
+    filteredResults() {
+      switch (this.activeTab) {
+        case '401': return this.results.filter(r => r.unauthorized_401);
+        case 'exceeded': return this.results.filter(r => r.quota_exceeded && !r.unauthorized_401);
+        case 'unlimited': return this.results.filter(r => r.no_limit_unlimited);
+        case 'errors': return this.results.filter(r => r.error && !r.unauthorized_401 && !r.quota_exceeded);
+        default: return this.results;
+      }
+    },
+
+    statusLabel(item) {
+      if (item.unauthorized_401) return '401';
+      if (item.quota_exceeded) return 'LIM';
+      if (item.error) return 'ERR';
+      if (item.no_limit_unlimited) return '∞';
+      if (item.status_code) return String(item.status_code);
+      return '?';
+    },
+
+    badgeClass(item) {
+      if (item.unauthorized_401) return 'bg-red-900/80 text-red-300';
+      if (item.quota_exceeded) return 'bg-purple-900/80 text-purple-300';
+      if (item.error) return 'bg-yellow-900/80 text-yellow-300';
+      if (item.no_limit_unlimited) return 'bg-green-900/80 text-green-300';
+      if (item.status_code >= 200 && item.status_code < 300) return 'bg-teal-900/80 text-teal-300';
+      return 'bg-gray-700 text-gray-400';
+    },
+
+    formatResetTime(item) {
+      if (!item.quota_resets_at) return '—';
+      return new Date(item.quota_resets_at * 1000).toLocaleString();
+    },
+
+    deleteFiles() {
+      const files = this.results.filter(r => r.unauthorized_401).map(r => r.file);
+      fetch('/api/delete-401', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ files }),
+      })
+        .then(r => r.json())
+        .then(d => {
+          this.deleteResult = `已删除 ${d.deleted_count} 个文件` + (d.errors.length ? `，${d.errors.length} 个失败` : '');
+          this.results = this.results.filter(r => !r.unauthorized_401);
+          this._calcStats();
+          this.confirmDelete = false;
+        })
+        .catch(err => { this.deleteResult = '删除失败: ' + err.message; });
+    },
+  };
+}
+</script>
+</body>
+</html>"""
+
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
+
+@app.get("/", response_class=HTMLResponse)
+async def index() -> str:
+    return _HTML
+
+
+@app.post("/api/scan")
+async def api_scan(req: ScanRequest) -> dict[str, Any]:
+    await manager.start_scan(req)
+    return {"ok": True, "status": "started"}
+
+
+@app.get("/api/scan/stream")
+async def api_scan_stream() -> StreamingResponse:
+    q = manager.subscribe()
+
+    async def event_generator():
+        try:
+            if manager.last_result is not None and not manager.running:
+                yield f"data: {json.dumps(manager.last_result, ensure_ascii=False)}\n\n"
+                return
+            while True:
+                event = await q.get()
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                if event.get("type") in {"final", "error"}:
+                    break
+        finally:
+            manager.unsubscribe(q)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.post("/api/delete-401")
+async def api_delete_401(req: Delete401Request) -> dict[str, Any]:
+    deleted_files, errors = _delete_files(req.files)
+    return {
+        "deleted_count": len(deleted_files),
+        "deleted_files": deleted_files,
+        "errors": [asdict(e) for e in errors],
+    }
+
+
+@app.get("/api/status")
+async def api_status() -> dict[str, Any]:
+    return {
+        "running": manager.running,
+        "has_result": manager.last_result is not None,
+    }
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)

@@ -1,0 +1,4 @@
+INFO:     127.0.0.1:61962 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53547 - "POST /api/scan HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58376 - "GET /api/scan/stream HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64552 - "POST /api/delete-401 HTTP/1.1" 200 OK

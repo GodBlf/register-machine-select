@@ -1,0 +1,29 @@
+app:
+  host: 0.0.0.0
+  port: 8000
+  read_timeout_seconds: 30
+  write_timeout_seconds: 30
+
+scan:
+  auth_dir: ./auth
+  exceeded_dir: ""
+  model: gpt-5.4
+  workers: 100
+  timeout_seconds: 20
+  refresh_before_check: false
+  no_quarantine: false
+  delete_401: false
+
+http_client:
+  codex_base_url: https://chatgpt.com/backend-api/codex
+  quota_path: /responses
+  refresh_url: https://auth.openai.com/oauth/token
+  retry_attempts: 3
+  retry_backoff_seconds: 0.6
+  client_id: app_EMoamEEZ73f0CkXaXp7hrann
+  version: 0.98.0
+  user_agent: codex_cli_rs/0.98.0 (go-port)
+
+web:
+  allow_origins:
+    - "*"

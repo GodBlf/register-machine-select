@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tempmail.lol Integration"
+  short_description: "Create temp inboxes and poll OTP via tempmail.lol"
+  default_prompt: "Use $tempmail-lol-integration to add tempmail.lol inbox creation and OTP polling to this project."
