@@ -1,0 +1,23 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV APP_DATA_DIR=/app/data
+ENV APP_CONFIG_PATH=/app/data/config.json
+ENV APP_LOG_DIR=/app/data/logs
+ENV APP_TEMPLATE_CONFIG_PATH=/app/config.example.json
+ENV APP_HOST=0.0.0.0
+ENV APP_PORT=8318
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY api_server.py auto_pool_maintainer.py config.example.json ./
+
+RUN mkdir -p /app/data/logs
+
+EXPOSE 8318
+
+CMD ["python", "api_server.py"]

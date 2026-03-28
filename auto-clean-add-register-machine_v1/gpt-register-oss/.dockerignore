@@ -1,0 +1,13 @@
+.git
+__pycache__
+*.pyc
+*.zip
+myenv
+logs
+frontend/node_modules
+frontend/dist
+src-tauri
+node_modules
+ui.png
+ui_preview.html
+ui_preview.css
