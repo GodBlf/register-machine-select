@@ -17,15 +17,25 @@
 在项目根目录执行：
 
 ```bash
-# 1. Python 依赖
-python3 -m venv .venv
-./.venv/bin/pip install -r requirements.txt
+# 1. Python 依赖（推荐使用 uv）
+uv venv .venv
+uv pip install -r requirements.txt
+
+# 如果你不使用 uv，也可以继续用 venv + pip
+# python3 -m venv .venv
+# ./.venv/bin/pip install -r requirements.txt
 
 # 2. 前端依赖
 cd frontend
 pnpm install
 cd ..
 ```
+
+说明：
+
+- `uv` 这里只用于安装 Python 后端依赖；前端依赖仍然使用 `pnpm`
+- 当前仓库没有 `pyproject.toml` / `uv.lock`，因此这里使用 `uv pip install -r requirements.txt`，而不是 `uv sync`
+- `uv venv .venv` 创建的虚拟环境与现有启动脚本兼容，无需额外修改脚本
 
 ### 2) 准备配置文件
 
@@ -42,7 +52,11 @@ cp config.example.json config.json
 ### 3) 启动项目
 
 ```bash
+# macOS / Linux
 ./dev_services.sh fg
+
+# Windows PowerShell
+.\dev_services.ps1 fg
 ```
 
 启动成功后：
@@ -85,6 +99,11 @@ cp config.example.json config.json
 ## 常用命令
 
 ```bash
+# win 用户可用 dev_services.ps1 脚本启动
+# 下方示例默认使用 bash 写法，Windows 对应命令见后
+
+# macOS / Linux
+
 # 前台启动（推荐调试）
 ./dev_services.sh fg
 
@@ -98,10 +117,30 @@ cp config.example.json config.json
 ./dev_services.sh stop
 ```
 
+Windows PowerShell 对应命令：
+
+```powershell
+# 前台启动（推荐调试）
+.\dev_services.ps1 fg
+
+# 后台启动
+.\dev_services.ps1 bg
+
+# 查看状态
+.\dev_services.ps1 status
+
+# 停止后台服务
+.\dev_services.ps1 stop
+```
+
 单次执行维护任务（不走前端）：
 
 ```bash
+# macOS / Linux
 ./.venv/bin/python auto_pool_maintainer.py --config config.json --log-dir logs
+
+# Windows PowerShell
+.\.venv\Scripts\python.exe auto_pool_maintainer.py --config config.json --log-dir logs
 ```
 
 ---
@@ -129,4 +168,3 @@ cp config.example.json config.json
 
 - `config.json`、`admin_token.txt` 可能包含敏感信息，不要公开上传。
 - 对外发布代码时，建议仅保留 `config.example.json`。
-
