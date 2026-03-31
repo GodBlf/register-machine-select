@@ -1,0 +1,102 @@
+{
+  "cfmail": {
+    "api_base": "",
+    "api_key": "YOUR_CFMAIL_ADMIN_PASSWORD",
+    "domain": "",
+    "domains": [
+    ]
+  },
+  "clean": {
+    "base_url": "https://your-cpa-host.example.com",
+    "token": "YOUR_CPA_PWD",
+    "target_type": "codex",
+    "workers": 20,
+    "sample_size": 0,
+    "delete_workers": 20,
+    "timeout": 10,
+    "retries": 1,
+    "user_agent": "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal",
+    "used_percent_threshold": 90
+  },
+  "mail": {
+    "provider": "tempmail_lol",
+    "api_base": "https://your-worker.workers.dev",
+    "api_key": "YOUR_MAIL_API_KEY",
+    "domain": "mail.example.com",
+    "domains": [
+      "mail.example.com",
+      "mail-backup.example.com"
+    ],
+    "otp_timeout_seconds": 120,
+    "poll_interval_seconds": 3
+  },
+  "duckmail": {
+    "api_base": "https://api.duckmail.sbs",
+    "bearer": "YOUR_DUCKMAIL_BEARER",
+    "domain": "duckmail.sbs",
+    "domains": [
+      "duckmail.sbs",
+      "duckmail-backup.example.com"
+    ]
+  },
+  "tempmail_lol": {
+    "api_base": "https://api.tempmail.lol/v2"
+  },
+  "yyds_mail": {
+    "api_base": "https://maliapi.215.im/v1",
+    "api_key": "YOUR_YYDS_MAIL_API_KEY",
+    "domain": "",
+    "domains": [
+      "mail-a.example.com",
+      "mail-b.example.com"
+    ]
+  },
+  "maintainer": {
+    "min_candidates": 50,
+    "loop_interval_seconds": 60
+  },
+  "run": {
+    "workers": 8,
+    "proxy": "",
+    "failure_threshold_for_cooldown": 5,
+    "failure_cooldown_seconds": 45,
+    "loop_jitter_min_seconds": 2,
+    "loop_jitter_max_seconds": 6
+  },
+  "flow": {
+    "step_retry_attempts": 2,
+    "step_retry_delay_base": 0.2,
+    "step_retry_delay_cap": 0.8,
+    "outer_retry_attempts": 3,
+    "oauth_local_retry_attempts": 3,
+    "transient_markers": "sentinel_,oauth_authorization_code_not_found,headers_failed,timeout,timed out,server disconnected,unexpected_eof_while_reading,transport,remoteprotocolerror,connection reset,temporarily unavailable,network,eof occurred,http_429,http_500,http_502,http_503,http_504",
+    "register_otp_validate_order": "normal,sentinel",
+    "oauth_otp_validate_order": "normal,sentinel",
+    "oauth_password_phone_action": "warn_and_continue",
+    "oauth_otp_phone_action": "warn_and_continue"
+  },
+  "registration": {
+    "entry_mode": "chatgpt_web",
+    "entry_mode_fallback": true,
+    "chatgpt_base": "https://chatgpt.com",
+    "register_create_account_phone_action": "warn_and_continue",
+    "phone_verification_markers": "add_phone,/add-phone,phone_verification,phone-verification,phone/verify"
+  },
+  "oauth": {
+    "issuer": "https://auth.openai.com",
+    "client_id": "app_EMoamEEZ73f0CkXaXp7hrann",
+    "redirect_uri": "http://localhost:1455/auth/callback",
+    "retry_attempts": 3,
+    "retry_backoff_base": 2,
+    "retry_backoff_max": 15,
+    "otp_timeout_seconds": 120,
+    "otp_poll_interval_seconds": 2
+  },
+  "output": {
+    "accounts_file": "accounts.txt",
+    "csv_file": "registered_accounts.csv",
+    "ak_file": "ak.txt",
+    "rk_file": "rk.txt",
+    "save_local": false
+  }
+}

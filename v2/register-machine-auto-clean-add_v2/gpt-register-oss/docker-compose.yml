@@ -1,0 +1,35 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: auto-pool-maintainer-backend
+    restart: unless-stopped
+    environment:
+      APP_DATA_DIR: /app/data
+      APP_CONFIG_PATH: /app/data/config.json
+      APP_LOG_DIR: /app/data/logs
+      APP_TEMPLATE_CONFIG_PATH: /app/config.example.json
+      APP_HOST: 0.0.0.0
+      APP_PORT: "8318"
+      APP_ADMIN_TOKEN: ${APP_ADMIN_TOKEN:-}
+    volumes:
+      - ./docker-data/backend:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8318/api/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: auto-pool-maintainer-frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "8080:80"
